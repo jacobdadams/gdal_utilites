@@ -1,5 +1,6 @@
 from osgeo import gdal
 import numpy as np
+import os
 
 class RasterChunk:
     '''
@@ -7,13 +8,13 @@ class RasterChunk:
     '''
 
 
-    def __init__():
+    def __init__(self):
 
         #: Rows and cols are dimensions of original area and don't include buffer
         self.rows = 0
         self.cols = 0
         self.buffer = 0
-
+        self.data_type = None
         self.driver = None
         self.bands = 0
         self.transform = None
@@ -33,12 +34,12 @@ class RasterChunk:
         file_handle = gdal.Open(dem_path, gdal.GA_ReadOnly)
 
         #: Set rows/cols to windowed size or the original file's size
-        if y_size:
+        if read_y:
             self.rows = read_y
         else:
             self.rows = file_handle.RasterYSize
         
-        if x_size:
+        if read_x:
             self.cols = read_x
         else:
             self.cols = file_handle.RasterXSize
@@ -51,8 +52,9 @@ class RasterChunk:
         #: Get source georeference info
         self.transform = file_handle.GetGeoTransform()
         self.projection = file_handle.GetProjection()
-        self.cell_size = abs(transform[5])  #: Assumes square pixels where height=width
-        self.nodata = file_handle.GetRasterBand(1).GetNoDataValue()  #: Assumes all bands have same nodata
+        self.cell_size = abs(self.transform[5])  #: Assumes square pixels where height=width
+        self.nodata = s_band.GetNoDataValue()  #: Assumes all bands have same nodata
+        self.data_type = s_band.DataType
 
 
         # data_array calculations
@@ -88,7 +90,7 @@ class RasterChunk:
             read_x_off = 0
             read_x_size -= buffer
             da_x_start = buffer
-        if x_off + x_size > cols:
+        if x_off + x_size > file_handle.RasterXSize:
             read_x_size -= buffer
             da_x_end = -buffer
 
@@ -96,18 +98,18 @@ class RasterChunk:
             read_y_off = 0
             read_y_size -= buffer
             da_y_start = buffer
-        if y_off + y_size > rows:
+        if y_off + y_size > file_handle.RasterYSize:
             read_y_size -= buffer
             da_y_end = -buffer
 
         #: Initialize data_array holding superset of actual desired window, initialized to NoData value if present, 0 otherwise.
         #:  Edge case logic insures edges fill appropriate portion when loaded in
         if self.nodata or self.nodata == 0:
-            self.data_array = np.full((bands, y_size, x_size), self.nodata)
+            self.data_array = np.full((self.bands, y_size, x_size), self.nodata)
         else:
-            data_array = np.full((bands, y_size, x_size), 0)
+            data_array = np.full((self.bands, y_size, x_size), 0)
 
-        for band in range(1, bands + 1):
+        for band in range(1, self.bands + 1):
 
             s_band = file_handle.GetRasterBand(band)
 
@@ -129,4 +131,27 @@ class RasterChunk:
         file_handle = None
 
     def write_chunk(self, out_path):
-        
+        '''
+        Writes the chunk out_path. If the chunk includes a buffer, only the original area inside the buffer is written (the new file will be the same dimensions as the source).
+        '''
+
+        #: If source was a VRT, force output to Geotiff
+        if self.driver.LongName == 'Virtual Raster':
+            driver = gdal.GetDriverByName('gtiff')
+        else:
+            driver = self.driver
+
+        if os.path.exists(out_path):
+            raise IOError(f'Output file {out_path} already exists.')
+
+        target_filehandle = driver.Create(out_path, self.cols, self.rows, self.bands, self.Datatype, options=['tiled=yes', 'bigtiff=yes'])
+        target_filehandle.SetGeoTransform(self.transform)
+        target_filehandle.SetProjection(self.projection)
+
+        for band in self.bands:
+            t_band = target_filehandle.GetRasterBand(band)
+            t_band.SetNoDataValue(self.nodata)
+            t_band.WriteArray(self.data_array[band])
+
+        t_band = None
+        target_filehandle = None
